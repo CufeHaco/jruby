@@ -278,4 +278,50 @@ public class UniversalByteMatcher {
     public boolean usesFlagBits() {
         return useFlagBits;
     }
+
+    // ============ Static Helper Methods ============
+
+    /**
+     * Static helper method for ByteList.indexOf integration
+     * Drop-in replacement with optimized byte matching
+     *
+     * @param source source byte array
+     * @param sourceOffset offset in source
+     * @param sourceCount length of source data
+     * @param target target pattern to find
+     * @param targetOffset offset in target
+     * @param targetCount length of target pattern
+     * @param fromIndex start position in source
+     * @return index of first match, or -1 if not found
+     */
+    public static int indexOf(byte[] source, int sourceOffset, int sourceCount,
+                             byte[] target, int targetOffset, int targetCount, int fromIndex) {
+        if (fromIndex >= sourceCount) return (targetCount == 0 ? sourceCount : -1);
+        if (fromIndex < 0) fromIndex = 0;
+        if (targetCount == 0) return fromIndex;
+
+        // Extract target pattern (handle offset)
+        byte[] pattern;
+        if (targetOffset == 0 && targetCount == target.length) {
+            pattern = target;
+        } else {
+            pattern = new byte[targetCount];
+            System.arraycopy(target, targetOffset, pattern, 0, targetCount);
+        }
+
+        // Create matcher and search
+        UniversalByteMatcher matcher = new UniversalByteMatcher(pattern, MatchMode.CONTAINS);
+        int searchOffset = sourceOffset + fromIndex;
+        int searchLength = sourceCount - fromIndex;
+
+        // Search in the source data
+        int pos = matcher.findContains(source, searchOffset, searchLength);
+
+        // Convert absolute position to relative position
+        if (pos >= 0) {
+            return pos - sourceOffset;
+        }
+
+        return -1;
+    }
 }
