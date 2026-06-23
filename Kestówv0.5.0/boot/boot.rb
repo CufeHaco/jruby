@@ -6,6 +6,7 @@
 # - Explicit bitwise operations (set, clear, test, toggle)
 # - Feature flag support
 # - Dynamic arrays + hotload + StringIO
+# - load_directory with rich extension filtering & conditional handling
 
 module Boot
   VERSION = '0.6.0'
@@ -170,6 +171,101 @@ module Boot
       entries.map do |e|
         { path: e[:path], loaded: load(e[:path], version: e[:version]) }
       end
+    end
+
+    # ============================================================
+    # NEW: load_directory with extension filtering & conditional dispatch
+    # ============================================================
+
+    # Main entry point (approved API)
+    def load_directory(dir,
+                        recursive:  false,
+                        extensions: nil,
+                        pattern:    nil,
+                        filter:     nil,
+                        on_load:    nil,
+                        on_skip:    nil,
+                        &block)
+
+      filter ||= block
+
+      files = collect_files(dir,
+        recursive:  recursive,
+        pattern:    pattern,
+        extensions: normalize_extensions(extensions)
+      )
+
+      files.each do |path|
+        if filter && !filter.call(path)
+          on_skip&.call(path)
+          next
+        end
+
+        dispatch(path)
+        on_load&.call(path)
+      end
+    end
+
+    # Helper to collect files (simple implementation)
+    def collect_files(dir, recursive: false, pattern: nil, extensions: nil)
+      glob = if recursive
+               File.join(dir, "**/*")
+             else
+               File.join(dir, "*")
+             end
+
+      files = Dir.glob(glob).select { |f| File.file?(f) }
+
+      if extensions
+        files.select! do |f|
+          ext = File.extname(f)
+          extensions.any? { |e| ext == e }
+        end
+      end
+
+      if pattern
+        files.select! { |f| File.fnmatch(pattern, f) || File.fnmatch(pattern, File.basename(f)) }
+      end
+
+      files
+    end
+
+    def normalize_extensions(ext)
+      case ext
+      in Array        then ext.map { |e| e.start_with?(".") ? e : ".#{e}" }
+      in /[*?{]/      then ext          # treat as glob pattern directly
+      in String       then [ext.start_with?(".") ? ext : ".#{ext}"]
+      in nil          then nil
+      end
+    end
+
+    # Central dispatch — routes based on extension / type
+    def dispatch(path)
+      ext = File.extname(path).downcase
+      case ext
+      when ".rb", ".so"
+        load(path)
+      when ".txt", ".md", ".conf"
+        load_text(path)
+      when ".json"
+        load_json(path)
+      else
+        mark("unknown_#{ext}")
+      end
+    end
+
+    def load_text(path)
+      content = File.read(path)
+      mark(File.basename(path))
+      # Future: parse or register as config/doc
+      content
+    end
+
+    def load_json(path)
+      require 'json' unless defined?(JSON)
+      data = JSON.parse(File.read(path))
+      mark(File.basename(path, '.json'))
+      data
     end
 
     # ============================================================
