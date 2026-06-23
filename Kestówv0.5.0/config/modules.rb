@@ -1,128 +1,188 @@
 # frozen_string_literal: true
 
-# Kestówv 0.5.0 - config/modules.rb
+# Kestówv 0.5.0 — config/modules.rb
 #
-# Module discovery and loading system.
-# Uses Boot primitives exclusively (no static require/load).
-# Registers features in the bit vector and supports hot reloading.
+# Module registry with:
+# - Auto-discovery via Boot.load_directory + byte_dispatch
+# - Explicit dependency declarations
+# - Topological load ordering (no circular deps)
+# - Failure isolation during boot
+# - Hot-reload with cascade support
 
 module Kestowv
   module Config
     module Modules
-      # ============================================================
-      # MODULE REGISTRY (bit vector backed)
-      # ============================================================
 
-      @registered_modules = {}
-      @mutex = Mutex.new
+      @modules = {}
+      @deps    = {}
+      @mutex   = Mutex.new
 
       class << self
-        def register(name, path, feature: nil)
+
+        # --------------------------------------------------------
+        # REGISTRATION
+        # --------------------------------------------------------
+
+        # Register a module explicitly.
+        # depends_on: load these modules before this one.
+        def register(name, path, feature: nil, depends_on: [])
+          key = name.to_sym
           @mutex.synchronize do
-            key = name.to_sym
-            @registered_modules[key] = {
-              path: path,
-              feature: feature || key,
-              loaded: false
+            next if @modules.key?(key)  # idempotent
+
+            feat = (feature || key).to_sym
+            @modules[key] = {
+              path:    path,
+              feature: feat,
+              loaded:  false,
+              failed:  false
             }
-            Boot.register(feature || key)
+            @deps[key] = depends_on.map(&:to_sym)
+            Boot.register(feat)
           end
+          self
         end
 
-        def registered
-          @registered_modules.keys
+        # --------------------------------------------------------
+        # AUTO-DISCOVERY
+        # --------------------------------------------------------
+
+        def discover(base_path)
+          log "Discovering under #{base_path}"
+
+          Boot.load_directory(base_path, recursive: true, auto_version: true) do |path|
+            next false unless File.extname(path) == ".rb"
+
+            bc = Boot.byte_dispatch(path)
+            next false if bc.skip?
+
+            name = File.basename(path, ".rb").to_sym
+            register(name, path) unless registered?(name)
+            false  # discovery only — Boot.load_directory must NOT require the file
+          end
+
+          self
         end
 
-        def loaded?(name)
+        # --------------------------------------------------------
+        # LOADING
+        # --------------------------------------------------------
+
+        # Load a single module, resolving dependencies first.
+        # Guards against circular deps via a visited set.
+        def load_module(name, visited: Set.new)
           key = name.to_sym
-          mod = @registered_modules[key]
-          return false unless mod
-          Boot.bit_set?(mod[:feature])
-        end
 
-        # ============================================================
-        # LOADING (always through Boot)
-        # ============================================================
-
-        def load_module(name)
-          key = name.to_sym
-          entry = @registered_modules[key]
+          entry = @mutex.synchronize { @modules[key]&.dup }
           return false unless entry
+          return true  if Boot.bit_set?(entry[:feature])
+          return false if entry[:failed]
 
-          path    = entry[:path]
-          feature = entry[:feature]
-
-          success = Boot.load(path)
-
-          if success
-            entry[:loaded] = true
-            # Boot.load marks the basename symbol; we also mark the feature
-            # alias explicitly so aliased features (e.g. :hal_cpu for cpu.rb)
-            # are correctly tracked in the bit vector.
-            Boot.set_bit(feature)
+          if visited.include?(key)
+            warn "[Modules] Circular dependency detected at :#{key}"
+            return false
           end
 
-          success
+          visited.add(key)
+
+          # Resolve dependencies first
+          deps = @mutex.synchronize { @deps[key].dup }
+          deps.each do |dep|
+            unless load_module(dep, visited: visited)
+              warn "[Modules] Dependency :#{dep} failed — skipping :#{key}"
+              mark_failed(key)
+              return false
+            end
+          end
+
+          # Load the module itself
+          result = Boot.safe_require(entry[:path])
+
+          if result
+            mark_loaded(key, entry[:feature])
+            log "✓ #{key} loaded"
+          else
+            mark_failed(key)
+            Boot.handle_error(
+              RuntimeError.new("Failed to load module :#{key}"),
+              { path: entry[:path], feature: entry[:feature] }
+            )
+          end
+
+          result
         end
 
         def load_all
-          @registered_modules.keys.map { |name| [name, load_module(name)] }
+          keys = @mutex.synchronize { @modules.keys.dup }
+          keys.each { |name| load_module(name) }
+          self
         end
+
+        # --------------------------------------------------------
+        # HOT-RELOAD
+        # --------------------------------------------------------
 
         def hotload_module(name)
-          key = name.to_sym
-          entry = @registered_modules[key]
+          key   = name.to_sym
+          entry = @mutex.synchronize { @modules[key]&.dup }
           return false unless entry
 
-          path    = entry[:path]
-          feature = entry[:feature]
+          Boot.invalidate(entry[:feature])
 
-          Boot.invalidate(feature)
-          success = Boot.hotload(path)
-
-          if success
-            entry[:loaded] = true
-            # Same aliased-feature rationale as load_module above
-            Boot.set_bit(feature)
-          end
-
-          success
+          result = Boot.hotload(entry[:path])
+          mark_loaded(key, entry[:feature]) if result
+          result
         end
 
-        # ============================================================
-        # DISCOVERY (can be extended later with ByteMatcher + .map)
-        # ============================================================
-
-        def scan_and_register(base_path = 'Kestówv0.5.0')
-          puts "→ Scanning modules under #{base_path} (manual registration for now)"
-
-          register(:core_klog,      "#{base_path}/core/klog.rb",      feature: :klog)
-          register(:core_scheduler, "#{base_path}/core/scheduler.rb", feature: :scheduler)
-          register(:hal_cpu,        "#{base_path}/hal/cpu.rb",        feature: :hal_cpu)
-          register(:mm_virtual,     "#{base_path}/mm/virtual.rb",       feature: :mm_virtual)
-          register(:proc_task,      "#{base_path}/proc/task.rb",        feature: :proc_task)
-        end
-
-        # ============================================================
+        # --------------------------------------------------------
         # INTROSPECTION
-        # ============================================================
+        # --------------------------------------------------------
+
+        def registered?(name)
+          @mutex.synchronize { @modules.key?(name.to_sym) }
+        end
 
         def to_a
-          @registered_modules.map do |name, info| do
-            {
-              name:    name,
-              path:    info[:path],
-              feature: info[:feature],
-              loaded:  Boot.bit_set?(info[:feature])
-            }
+          @mutex.synchronize do
+            @modules.map do |name, info|
+              {
+                name:    name,
+                path:    info[:path],
+                feature: info[:feature],
+                loaded:  Boot.bit_set?(info[:feature]),
+                failed:  info[:failed],
+                deps:    @deps[name]
+              }
+            end
           end
         end
 
         def stats
-          {
-            total_registered: @registered_modules.size,
-            loaded_count:     @registered_modules.count { |_, info| Boot.bit_set?(info[:feature]) }
-          }
+          @mutex.synchronize do
+            {
+              total:   @modules.size,
+              loaded:  @modules.count { |_, i| i[:loaded] },
+              failed:  @modules.count { |_, i| i[:failed] }
+            }
+          end
+        end
+
+        private
+
+        def mark_loaded(key, feature)
+          @mutex.synchronize do
+            @modules[key][:loaded] = true
+            @modules[key][:failed] = false
+          end
+          Boot.set_bit(feature)
+        end
+
+        def mark_failed(key)
+          @mutex.synchronize { @modules[key][:failed] = true }
+        end
+
+        def log(msg)
+          puts "  [Modules] #{msg}" unless Boot.config.quiet
         end
       end
     end
