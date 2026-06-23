@@ -32,7 +32,7 @@ module Boot
   $boot_active_version ||= nil
 
   # ============================================================
-  # Boot::Config — Central Configuration
+  # Boot::Config — Central Configuration (Struct + extended key support)
   # ============================================================
   Config = Struct.new(
     :min_version,
@@ -50,8 +50,38 @@ module Boot
       )
     end
 
+    # Extended key-value store for keys not in the Struct
+    @extended = {}
+
+    class << self
+      def extended
+        @extended
+      end
+
+      def config_set(key, value)
+        key = key.to_sym
+        if members.include?(key)
+          # Direct struct field
+          instance = Boot.instance_variable_get(:@config)
+          instance[key] = value if instance
+        else
+          @extended[key] = value
+        end
+      end
+
+      def config_get(key)
+        key = key.to_sym
+        if members.include?(key)
+          instance = Boot.instance_variable_get(:@config)
+          instance ? instance[key] : nil
+        else
+          @extended[key]
+        end
+      end
+    end
+
     def to_h
-      super.compact
+      super.compact.merge(self.class.extended)
     end
   end
 
