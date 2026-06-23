@@ -2,7 +2,7 @@
 
 # Kestówv 0.5.0 - proc/limits.rb
 #
-# Resource limits (rlimits).
+# Resource limits.
 # Registers limits features.
 
 module Kestowv
