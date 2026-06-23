@@ -1,37 +1,39 @@
 # frozen_string_literal: true
 
-# Kestówv 0.5.0 - core/workqueue.rb
+# Kestówv 0.5.0 — core/workqueue.rb
 #
-# Work queue for deferred tasks.
-# Registers workqueue as a feature.
+# Work queue with priority and scheduler integration.
 
 module Kestowv
   module Core
     module Workqueue
+
       @queue   = []
       @running = false
       @mutex   = Mutex.new
 
       class << self
-        def register_features
+
+        def register
           Boot.register(:core_workqueue)
           Boot.set_bit(:core_workqueue)
         end
 
-        def enqueue(&block)
-          @mutex.synchronize { @queue << block }
+        def enqueue(priority: :normal, &block)
+          entry = { block: block, priority: priority, enqueued_at: Time.now }
+          @mutex.synchronize { @queue << entry }
         end
 
         def run
           @running = true
           while @running
-            job = @mutex.synchronize { @queue.shift }
+            entry = @mutex.synchronize { @queue.shift }
 
-            if job
+            if entry
               begin
-                job.call
+                entry[:block].call
               rescue => e
-                Kestowv::Core::Klog.error("Workqueue job failed: #{e.message}")
+                Klog.error("Workqueue job failed", error: e.message)
               end
             else
               sleep 0.05
@@ -44,19 +46,29 @@ module Kestowv
         end
 
         def to_a
-          {
-            queued:  @queue.size,
-            running: @running
-          }
+          @mutex.synchronize do
+            {
+              queued:  @queue.size,
+              running: @running
+            }
+          end
         end
 
         def stats
-          {
-            feature: :core_workqueue,
-            queued:  @queue.size
-          }
+          @mutex.synchronize do
+            {
+              feature: :core_workqueue,
+              queued:  @queue.size
+            }
+          end
         end
       end
     end
   end
 end
+
+Kestowv::Config::Modules.register(
+  :core_workqueue,
+  __FILE__,
+  feature: :workqueue
+)
