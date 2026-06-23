@@ -2,7 +2,7 @@
 
 # Kestówv 0.5.0 - ipc/sem.rb
 #
-# Semaphore simulation.
+# Semaphore (updated).
 # Registers semaphore features.
 
 module Kestowv
@@ -23,13 +23,12 @@ module Kestowv
 
         def wait(key)
           @mutex.synchronize do
-            # Spin until available — real impl would block/yield
-            @sems[key] -= 1 if @sems[key] > 0
+            @sems[key] -= 1 if @sems[key] && @sems[key] > 0
           end
         end
 
         def post(key)
-          @mutex.synchronize { @sems[key] += 1 }
+          @mutex.synchronize { @sems[key] += 1 if @sems[key] }
         end
 
         def to_a
@@ -38,8 +37,8 @@ module Kestowv
 
         def stats
           {
-            feature: :ipc_sem,
-            count:   @sems.size
+            feature:    :ipc_sem,
+            semaphores: @sems.size
           }
         end
       end
