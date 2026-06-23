@@ -2,7 +2,7 @@
 
 # Kestówv 0.5.0 - proc/pid.rb
 #
-# PID allocation and management.
+# PID management (refined).
 # Registers PID features.
 
 module Kestowv
@@ -22,7 +22,7 @@ module Kestowv
           @mutex.synchronize do
             pid = @next_pid
             @next_pid += 1
-            @pids[pid] = { state: :allocated, created_at: Time.now }
+            @pids[pid] = { state: :allocated }
             pid
           end
         end
@@ -31,19 +31,18 @@ module Kestowv
           @mutex.synchronize { @pids.delete(pid) }
         end
 
-        def active_pids
+        def active
           @pids.keys
         end
 
         def to_a
-          @pids
+          @pids.keys
         end
 
         def stats
           {
-            feature:   :proc_pid,
-            allocated: @pids.size,
-            next_pid:  @next_pid
+            feature: :proc_pid,
+            active:  @pids.size
           }
         end
       end
