@@ -2,7 +2,7 @@
 
 # Kestówv 0.5.0 - ipc/rpc.rb
 #
-# Remote Procedure Call simulation.
+# RPC simulation (refined).
 # Registers RPC features.
 
 module Kestowv
