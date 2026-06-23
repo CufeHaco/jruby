@@ -2,7 +2,7 @@
 
 # Kestówv 0.5.0 - proc/session.rb
 #
-# Session and process group management.
+# Session management.
 # Registers session features.
 
 module Kestowv
