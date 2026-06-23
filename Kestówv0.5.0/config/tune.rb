@@ -1,14 +1,15 @@
 # frozen_string_literal: true
 
-# Kestówv 0.5.0 - config/tune.rb
+# Kestówv 0.5.0 — config/tune.rb
 #
-# Performance tuning profiles.
-# Profiles register themselves as bit vector features.
-# All loading uses Boot primitives.
+# Runtime tuning profiles.
+# Applies profile values into Params and Boot.config_set.
+# Profile transitions are tracked in the bit vector.
 
 module Kestowv
   module Config
     module Tune
+
       PROFILES = {
         default: {
           vm:     { gc: :balanced },
@@ -27,39 +28,69 @@ module Kestowv
         }
       }.freeze
 
-      @current_profile = :default
+      @current = :default
+      @mutex   = Mutex.new
 
       class << self
-        def register_profiles
-          PROFILES.keys.each { |p| Boot.register(:"profile_#{p}") }
-        end
 
         def apply(profile)
           key = profile.to_sym
           return false unless PROFILES.key?(key)
 
-          @current_profile = key
-          Boot.set_bit(:"profile_#{key}")
+          @mutex.synchronize do
+            old      = @current
+            @current = key
 
-          (PROFILES.keys - [key]).each { |other| Boot.clear_bit(:"profile_#{other}") }
+            Boot.clear_bit(profile_bit(old)) if old != key
+            Boot.set_bit(profile_bit(key))
+
+            push_to_config(PROFILES[key])
+          end
 
           true
         end
 
         def current
-          @current_profile
+          @mutex.synchronize { @current }
         end
 
-        def settings
-          PROFILES[@current_profile]
+        # Returns the live settings hash for the active profile.
+        # Named `active_settings` to avoid shadowing Kernel#settings
+        # and to be unambiguous at call sites.
+        def active_settings
+          @mutex.synchronize { PROFILES[@current] }
         end
 
-        def to_a
-          {
-            current:   @current_profile,
-            available: PROFILES.keys,
-            settings:  settings
-          }
+        def available
+          PROFILES.keys
+        end
+
+        def to_h
+          @mutex.synchronize do
+            {
+              current:   @current,
+              available: PROFILES.keys,
+              settings:  PROFILES[@current]
+            }
+          end
+        end
+
+        private
+
+        def profile_bit(key)
+          :"tune_profile_#{key}"
+        end
+
+        # Flatten nested profile hash into Params + extended config.
+        # e.g. { vm: { gc: :aggressive } } → vm_gc = :aggressive
+        def push_to_config(profile_settings)
+          profile_settings.each do |category, values|
+            values.each do |k, v|
+              full_key = :"#{category}_#{k}"
+              Params.set(full_key, v)
+              Boot.config_set(full_key, v)
+            end
+          end
         end
       end
     end
