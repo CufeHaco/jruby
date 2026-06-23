@@ -1,0 +1,143 @@
+# frozen_string_literal: true
+
+# Boot - Reusable Bootloader with Real Bit Vector Logic (v0.5-final)
+#
+# - Real integer bit vectors (thread-local)
+# - Keys normalized to Symbol
+# - Dynamic arrays kept for introspection
+# - Hotload + StringIO support
+
+module Boot
+  VERSION = '0.5.0'
+
+  $boot_loaded   ||= []
+  $boot_features ||= []
+  $boot_versions ||= []
+
+  @bit_registry      = {}
+  @next_bit_position = 0
+  @registry_mutex    = Mutex.new
+
+  class << self
+    def register(name)
+      key = name.to_sym
+      @registry_mutex.synchronize do
+        return @bit_registry[key] if @bit_registry.key?(key)
+        pos = @next_bit_position
+        @bit_registry[key] = pos
+        @next_bit_position += 1
+        pos
+      end
+    end
+
+    def bit_position(name)
+      @bit_registry[name.to_sym]
+    end
+
+    def current_vector
+      Thread.current[:boot_bit_vector] ||= 0
+    end
+
+    def set_bit(name)
+      pos = register(name)
+      Thread.current[:boot_bit_vector] = current_vector | (1 << pos)
+      mark_array(name)
+    end
+
+    def clear_bit(name)
+      pos = bit_position(name)
+      return false unless pos
+
+      Thread.current[:boot_bit_vector] = current_vector & ~(1 << pos)
+      invalidate_array(name)
+      true
+    end
+
+    def bit_set?(name)
+      pos = bit_position(name)
+      return false unless pos
+      (current_vector & (1 << pos)) != 0
+    end
+
+    def mark_array(name)
+      str = name.to_s
+      $boot_loaded   << str unless $boot_loaded.include?(str)
+      $boot_features << str unless $boot_features.include?(str)
+    end
+
+    def invalidate_array(name)
+      str = name.to_s
+      $boot_loaded.reject!   { |e| e == str }
+      $boot_features.reject! { |e| e == str }
+      # Note: $boot_versions intentionally kept for audit history
+    end
+
+    def loaded?(name)
+      bit_set?(name)
+    end
+
+    def mark(name)
+      set_bit(name)
+    end
+
+    def invalidate(name)
+      clear_bit(name)
+    end
+
+    def load_files(paths)
+      paths.map { |p| [p, load(p)] }
+    end
+
+    def load(path, version: nil)
+      puts "  [Boot] load: #{path}"
+      begin
+        require path
+        mark(File.basename(path, '.rb'))
+        $boot_versions << { file: path, version: version } if version
+        true
+      rescue => e
+        warn "[Boot] FAILED: #{path} - #{e.message}"
+        false
+      end
+    end
+
+    def load_stringio(stringio, name:)
+      return false if loaded?(name)
+      content = stringio.read
+      eval(content, TOPLEVEL_BINDING, name.to_s, 1)
+      mark(name)
+      true
+    rescue => e
+      warn "[Boot] StringIO load failed for #{name}: #{e.message}"
+      false
+    end
+
+    def hotload(path)
+      name = File.basename(path, '.rb').to_sym
+      puts "  [Boot] HOTLOAD: #{path}"
+      invalidate(name)
+      load(path)
+    end
+
+    def load_versioned(entries)
+      entries.map do |e|
+        { path: e[:path], loaded: load(e[:path], version: e[:version]) }
+      end
+    end
+
+    def to_a
+      $boot_loaded
+    end
+
+    def features
+      $boot_features
+    end
+
+    def bit_stats
+      {
+        registered_features: @bit_registry.size,
+        bits_set_in_current_thread: current_vector.to_s(2).count('1')
+      }
+    end
+  end
+end
