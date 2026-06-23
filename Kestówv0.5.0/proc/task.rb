@@ -1,56 +1,137 @@
 # frozen_string_literal: true
 
-# Kestówv 0.5.0 - proc/task.rb
+# Kestówv 0.5.0 — proc/task.rb
 #
-# Basic task structure.
-# Registers task features.
+# Task (lightweight process / thread group entry).
+# Integrates with KThread, mm::VmSpace, and KObject lifecycle.
 
 module Kestowv
   module Proc
-    module Task
-      @tasks    = {}
-      @next_tid = 1
-      @mutex    = Mutex.new
+    class Task < Kestowv::Core::KObject
 
-      class << self
-        def register_features
-          Boot.register(:proc_task)
-          Boot.set_bit(:proc_task)
-        end
+      attr_reader :tid, :name
 
-        def create(name, &block)
-          @mutex.synchronize do
-            tid = @next_tid
-            @next_tid += 1
-            @tasks[tid] = {
-              name:       name,
-              block:      block,
-              state:      :ready,
-              created_at: Time.now
-            }
-            tid
-          end
-        end
+      # Task states — mirrors Linux task_struct states.
+      STATES = %i[ready running blocked zombie].freeze
 
-        def get(tid)
-          @tasks[tid]
-        end
+      # Class-level TID allocator — promoted from @@ to class ivar
+      # so it doesn't leak across subclasses via Ruby's @@ inheritance.
+      @next_tid  = 0
+      @tid_mutex = Mutex.new
 
-        def active
-          @tasks.keys
-        end
+      def self.next_tid
+        @tid_mutex.synchronize { @next_tid += 1 }
+      end
 
-        def to_a
-          @tasks
-        end
+      # --------------------------------------------------------
+      # LIFECYCLE
+      # --------------------------------------------------------
 
-        def stats
-          {
-            feature: :proc_task,
-            count:   @tasks.size
-          }
+      def initialize(name: nil, vm_space: nil)
+        super(type_tag: :task)
+
+        @tid      = self.class.next_tid
+        @name     = (name || :"task_#{@tid}").to_sym
+        @state    = :ready
+        @vm_space = vm_space  # optional — assigned when mm is ready
+
+        Boot.register(task_bit)
+        Boot.set_bit(task_bit)
+      end
+
+      # --------------------------------------------------------
+      # STATE MANAGEMENT — through inherited @mutex
+      # --------------------------------------------------------
+
+      def state
+        @mutex.synchronize { @state }
+      end
+
+      def state=(new_state)
+        raise ArgumentError, "Invalid state: #{new_state}" unless STATES.include?(new_state)
+
+        @mutex.synchronize { @state = new_state }
+
+        # Reflect terminal state in bit vector
+        Boot.clear_bit(task_bit) if new_state == :zombie
+      end
+
+      def transition(new_state)
+        self.state = new_state
+        self
+      end
+
+      def runnable?
+        @mutex.synchronize { @state == :ready || @state == :running }
+      end
+
+      def blocked?
+        @mutex.synchronize { @state == :blocked }
+      end
+
+      def zombie?
+        @mutex.synchronize { @state == :zombie }
+      end
+
+      # --------------------------------------------------------
+      # VM SPACE
+      # --------------------------------------------------------
+
+      def vm_space
+        @mutex.synchronize { @vm_space }
+      end
+
+      def assign_vm_space(space)
+        raise ArgumentError, "Expected VmSpace" unless space.is_a?(Mm::VmSpace)
+        @mutex.synchronize { @vm_space = space }
+        self
+      end
+
+      # --------------------------------------------------------
+      # LIFECYCLE OVERRIDE
+      # --------------------------------------------------------
+
+      def destroy
+        @mutex.synchronize { @state = :zombie }
+        Boot.clear_bit(task_bit)
+        super
+      end
+
+      # --------------------------------------------------------
+      # INTROSPECTION
+      # --------------------------------------------------------
+
+      def to_h
+        @mutex.synchronize do
+          super.merge(
+            tid:      @tid,
+            name:     @name,
+            state:    @state,
+            vm_space: @vm_space&.to_s
+          )
         end
+      end
+
+      def to_s
+        "#<Task #{@name}[#{@tid}] state=#{state} rc=#{refcount}>"
+      end
+
+      private
+
+      def task_bit
+        :"proc_task_#{@tid}"
       end
     end
   end
 end
+
+# --------------------------------------------------------
+# AUTO-REGISTER
+# Remove :core_scheduler until that module exists.
+# --------------------------------------------------------
+Kestowv::Config::Modules.register(
+  :proc_task,
+  __FILE__,
+  feature:    :proc_task,
+  depends_on: [:core_kobject, :core_thread, :mm_vm_space]
+)
