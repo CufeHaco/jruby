@@ -386,16 +386,17 @@ module Boot
     end
 
     # ============================================================
-    # load_directory
+    # load_directory (now supports auto_version)
     # ============================================================
 
     def load_directory(dir,
-                        recursive:  false,
-                        extensions: nil,
-                        pattern:    nil,
-                        filter:     nil,
-                        on_load:    nil,
-                        on_skip:    nil,
+                        recursive:    false,
+                        extensions:   nil,
+                        pattern:      nil,
+                        filter:       nil,
+                        on_load:      nil,
+                        on_skip:      nil,
+                        auto_version: false,
                         &block)
 
       filter ||= block
@@ -408,7 +409,13 @@ module Boot
           on_skip&.call(path)
           next
         end
-        dispatch(path)
+
+        version = nil
+        if auto_version
+          version = extract_version_from_file_header(path) || extract_version_from_path(path)
+        end
+
+        dispatch(path, version: version)
         on_load&.call(path)
       end
     end
