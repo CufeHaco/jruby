@@ -7,6 +7,7 @@
 # - Feature flag support
 # - Dynamic arrays + hotload + StringIO
 # - load_directory with rich extension filtering & conditional handling
+# - Advanced version system with auto-detection (directory + file header/shebang)
 
 module Boot
   VERSION = '0.6.0'
@@ -18,6 +19,15 @@ module Boot
   @bit_registry      = {}
   @next_bit_position = 0
   @registry_mutex    = Mutex.new
+
+  # ============================================================
+  # VERSION CONSTANTS
+  # ============================================================
+  CURRENT_VERSION = '0.5.0'
+  MIN_VERSION     = '0.4.0'
+
+  $boot_version_order  ||= []
+  $boot_active_version ||= nil
 
   class << self
     # ============================================================
@@ -167,6 +177,7 @@ module Boot
       load(path)
     end
 
+    # Backward-compatible simple versioned loader
     def load_versioned(entries)
       entries.map do |e|
         { path: e[:path], loaded: load(e[:path], version: e[:version]) }
@@ -177,7 +188,6 @@ module Boot
     # NEW: load_directory with extension filtering & conditional dispatch
     # ============================================================
 
-    # Main entry point (approved API)
     def load_directory(dir,
                         recursive:  false,
                         extensions: nil,
@@ -206,7 +216,6 @@ module Boot
       end
     end
 
-    # Helper to collect files (simple implementation)
     def collect_files(dir, recursive: false, pattern: nil, extensions: nil)
       glob = if recursive
                File.join(dir, "**/*")
@@ -233,13 +242,12 @@ module Boot
     def normalize_extensions(ext)
       case ext
       in Array        then ext.map { |e| e.start_with?(".") ? e : ".#{e}" }
-      in /[*?{]/      then ext          # treat as glob pattern directly
+      in /[*?{]/      then ext
       in String       then [ext.start_with?(".") ? ext : ".#{ext}"]
       in nil          then nil
       end
     end
 
-    # Central dispatch — routes based on extension / type
     def dispatch(path)
       ext = File.extname(path).downcase
       case ext
@@ -257,7 +265,6 @@ module Boot
     def load_text(path)
       content = File.read(path)
       mark(File.basename(path))
-      # Future: parse or register as config/doc
       content
     end
 
@@ -266,6 +273,105 @@ module Boot
       data = JSON.parse(File.read(path))
       mark(File.basename(path, '.json'))
       data
+    end
+
+    # ============================================================
+    # ADVANCED VERSION SYSTEM
+    # ============================================================
+
+    def current_version
+      CURRENT_VERSION
+    end
+
+    def set_current_version(ver)
+      $boot_active_version = ver.to_s
+    end
+
+    def activate_version(ver)
+      $boot_active_version = ver.to_s
+      set_bit("version_#{ver}")
+    end
+
+    def version_active?(ver)
+      $boot_active_version == ver.to_s || bit_set?("version_#{ver}".to_sym)
+    end
+
+    # Priority 1: file header (first 5 lines)
+    def extract_version_from_file_header(path)
+      return nil unless File.exist?(path)
+
+      File.open(path, "r") do |f|
+        5.times do
+          line = f.gets
+          break unless line
+
+          return $1 if line =~ /#!.*kestowv.*version[:\s=]+(\d+\.\d+(?:\.\d+)?)/i
+          return $1 if line =~ /version[:\s=]+["']?(\d+\.\d+(?:\.\d+)?)["']?/i
+        end
+      end
+      nil
+    rescue
+      nil
+    end
+
+    # Priority 2: parent directory name
+    def extract_version_from_path(path)
+      path.split("/").reverse_each do |part|
+        return $1 if part =~ /kest[oó]w?v[\._-]?(\d+\.\d+(?:\.\d+)?)/i
+        return $1 if part =~ /\A(\d+\.\d+(?:\.\d+)?)\z/
+      end
+      nil
+    end
+
+    def load_versioned_smart(entries, current: CURRENT_VERSION)
+      set_current_version(current)
+
+      ordered = generate_version_order(entries, current: current)
+
+      ordered.each do |entry|
+        result = load(entry[:path], version: entry[:version])
+
+        $boot_version_order << {
+          path:             entry[:path],
+          detected_version: entry[:version],
+          loaded:           result,
+          active:           entry[:version] == current
+        }
+      end
+
+      $boot_version_order
+    end
+
+    def generate_version_order(entries, current: CURRENT_VERSION)
+      current_prefix = current.split(".").first(2).join(".")
+
+      local_first = []
+      current_ver = []
+      older       = []
+
+      entries.each do |entry|
+        path           = entry[:path]
+        header_version = extract_version_from_file_header(path)
+        dir_version    = extract_version_from_path(path)
+        final_version  = header_version || entry[:version] || dir_version || current
+
+        resolved = entry.merge(version: final_version)
+
+        case path
+        when /\/(local|bin)\//
+          local_first << resolved
+        else
+          next if Gem::Version.new(final_version) < Gem::Version.new(MIN_VERSION)
+
+          if final_version == current || final_version.start_with?(current_prefix)
+            current_ver << resolved
+          else
+            older << resolved
+          end
+        end
+      end
+
+      local_first + current_ver + older
     end
 
     # ============================================================
