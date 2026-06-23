@@ -1,41 +1,74 @@
 # frozen_string_literal: true
 
-# Kestówv 0.5.0 - hal/interrupts.rb
+# Kestówv 0.5.0 — hal/interrupts.rb
 #
-# Interrupt handling abstraction.
-# Registers interrupt features.
+# Interrupt handling abstraction with classification and stats.
 
 module Kestowv
   module Hal
     module Interrupts
+
       @handlers = {}
+      @stats    = Hash.new(0)
       @mutex    = Mutex.new
 
+      IRQ_TYPES = {
+        timer:     0,
+        keyboard:  1,
+        network:   2,
+        storage:   3,
+        ipi:       4
+      }.freeze
+
       class << self
-        def register_features
+
+        def register
           Boot.register(:hal_interrupts)
           Boot.set_bit(:hal_interrupts)
         end
 
-        def register(irq, &block)
-          @mutex.synchronize { @handlers[irq] = block }
+        def register_irq(irq, type: :ipi, &block)
+          @mutex.synchronize do
+            @handlers[irq] = { handler: block, type: type }
+          end
         end
 
         def handle(irq)
-          @handlers[irq]&.call
-        end
+          entry = @mutex.synchronize { @handlers[irq] }
+          return false unless entry
 
-        def to_a
-          @handlers.keys
+          @mutex.synchronize { @stats[irq] += 1 }
+
+          begin
+            entry[:handler].call if entry[:handler]
+            true
+          rescue => e
+            Boot.handle_error(e, { irq: irq, type: entry[:type] })
+            false
+          end
         end
 
         def stats
-          {
-            feature:  :hal_interrupts,
-            handlers: @handlers.size
-          }
+          @mutex.synchronize do
+            {
+              feature:   :hal_interrupts,
+              handlers:  @handlers.size,
+              delivered: @stats.values.sum
+            }
+          end
+        end
+
+        def to_a
+          @mutex.synchronize { @handlers.keys.sort }
         end
       end
     end
   end
 end
+
+Kestowv::Config::Modules.register(
+  :hal_interrupts,
+  __FILE__,
+  feature:    :hal_interrupts,
+  depends_on: [:hal_cpu]
+)
