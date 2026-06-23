@@ -6,8 +6,9 @@
 # - Explicit bitwise operations (set, clear, test, toggle)
 # - Feature flag support
 # - Dynamic arrays + hotload + StringIO
-# - load_directory with rich extension filtering & conditional handling
+# - load_directory with rich extension filtering & conditional dispatch
 # - Advanced version system with auto-detection (directory + file header/shebang)
+# - Unified Boot.load entry point (flexible input + smart block filter)
 
 module Boot
   VERSION = '0.6.0'
@@ -185,7 +186,71 @@ module Boot
     end
 
     # ============================================================
-    # NEW: load_directory with extension filtering & conditional dispatch
+    # UNIFIED ENTRY POINT: Boot.load
+    # Accepts String or Array. Block is a filter:
+    #   true  => let dispatch handle it
+    #   false => caller already handled it, skip dispatch
+    # ============================================================
+
+    def load(target, recursive: false, auto_version: false, &block)
+      case target
+      in String then load_single(target, recursive: recursive, auto_version: auto_version, &block)
+      in Array  then load_multi(target,  recursive: recursive, auto_version: auto_version, &block)
+      end
+    end
+
+    def load_single(target, recursive:, auto_version:, &block)
+      path, version = resolve_target(target, auto_version: auto_version)
+
+      if File.directory?(path)
+        load_directory(path,
+          recursive:    recursive,
+          auto_version: auto_version,
+          filter:       block
+        )
+      else
+        return if block && !block.call(target)
+        dispatch(path, version: version)
+      end
+    end
+
+    def load_multi(targets, recursive:, auto_version:, &block)
+      targets.each do |target|
+        load_single(target, recursive: recursive, auto_version: auto_version, &block)
+      end
+    end
+
+    def resolve_target(target, auto_version:)
+      # Versioned root like "Kestówv0.5.0"
+      if target =~ /kest[oó]w?v[\._-]?(\d+\.\d+(?:\.\d+)?)/i
+        version = $1
+        path    = locate_versioned_root(version)
+        return [path, version]
+      end
+
+      version = nil
+      if auto_version
+        version = extract_version_from_file_header(target) ||
+                  extract_version_from_path(target)
+      end
+
+      [target, version]
+    end
+
+    # Simple locator — can be improved later to search common locations
+    def locate_versioned_root(version)
+      # Try common patterns
+      candidates = [
+        "Kestówv#{version}",
+        "Kestowv#{version}",
+        "kestowv-#{version}",
+        "kestowv_#{version}"
+      ]
+      candidates.find { |c| File.directory?(c) } || "Kestówv#{version}"
+    end
+
+    # ============================================================
+    # load_directory + helpers (existing)
     # ============================================================
 
     def load_directory(dir,
@@ -248,11 +313,11 @@ module Boot
       end
     end
 
-    def dispatch(path)
+    def dispatch(path, version: nil)
       ext = File.extname(path).downcase
       case ext
       when ".rb", ".so"
-        load(path)
+        load(path, version: version)
       when ".txt", ".md", ".conf"
         load_text(path)
       when ".json"
@@ -296,7 +361,6 @@ module Boot
       $boot_active_version == ver.to_s || bit_set?("version_#{ver}".to_sym)
     end
 
-    # Priority 1: file header (first 5 lines)
     def extract_version_from_file_header(path)
       return nil unless File.exist?(path)
 
@@ -314,7 +378,6 @@ module Boot
       nil
     end
 
-    # Priority 2: parent directory name
     def extract_version_from_path(path)
       path.split("/").reverse_each do |part|
         return $1 if part =~ /kest[oó]w?v[\._-]?(\d+\.\d+(?:\.\d+)?)/i
