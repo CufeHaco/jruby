@@ -9,6 +9,7 @@
 # - load_directory with rich extension filtering & conditional dispatch
 # - Advanced version system with auto-detection (directory + file header/shebang)
 # - Unified Boot.load entry point (flexible input + smart block filter)
+# - Boot::Config + error handling + ByteClass dispatch
 
 module Boot
   VERSION = '0.6.0'
@@ -22,13 +23,87 @@ module Boot
   @registry_mutex    = Mutex.new
 
   # ============================================================
-  # VERSION CONSTANTS
+  # VERSION CONSTANTS (defaults — can be overridden via config)
   # ============================================================
   CURRENT_VERSION = '0.5.0'
   MIN_VERSION     = '0.4.0'
 
   $boot_version_order  ||= []
   $boot_active_version ||= nil
+
+  # ============================================================
+  # Boot::Config — Central Configuration
+  # ============================================================
+  Config = Struct.new(
+    :min_version,
+    :auto_version,
+    :quiet,
+    :on_error,
+    keyword_init: true
+  ) do
+    def self.defaults
+      new(
+        min_version:  MIN_VERSION,
+        auto_version: false,
+        quiet:        false,
+        on_error:     :warn
+      )
+    end
+
+    def to_h
+      super.compact
+    end
+  end
+
+  @config = Config.defaults
+
+  def self.config
+    @config
+  end
+
+  def self.on_error=(handler)
+    @config.on_error = handler
+  end
+
+  # ============================================================
+  # ERROR HANDLING
+  # ============================================================
+
+  def self.handle_error(error, context = {})
+    case @config.on_error
+    in :raise               then raise error
+    in :warn                then warn "[Boot] #{error.class}: #{error.message} | #{context}"
+    in :quiet               then nil
+    in Proc => handler      then handler.call(error, context)
+    else                         warn "[Boot] Unhandled error: #{error.message}"
+    end
+
+    false
+  end
+
+  # ============================================================
+  # ByteClass + byte_dispatch
+  # ============================================================
+
+  ByteClass = Struct.new(:kind, :confidence, keyword_init: true)
+
+  def self.byte_dispatch(path)
+    ext      = File.extname(path).downcase
+    basename = File.basename(path)
+
+    case
+    when ext == ".rb" || ext == ".so"
+      ByteClass.new(kind: :ruby_source,   confidence: 1.0)
+    when ext == ".json"
+      ByteClass.new(kind: :config_json,   confidence: 1.0)
+    when ext == ".md"  || ext == ".txt"
+      ByteClass.new(kind: :documentation, confidence: 0.9)
+    when basename.match?(/version|config|params/i)
+      ByteClass.new(kind: :config_file,   confidence: 0.8)
+    else
+      ByteClass.new(kind: :unknown,       confidence: 0.3)
+    end
+  end
 
   class << self
     # ============================================================
@@ -155,8 +230,7 @@ module Boot
         $boot_versions << { file: path, version: version } if version
         true
       rescue => e
-        warn "[Boot] FAILED: #{path} - #{e.message}"
-        false
+        handle_error(e, { path: path, version: version })
       end
     end
 
@@ -167,7 +241,7 @@ module Boot
       mark(name)
       true
     rescue => e
-      warn "[Boot] StringIO load failed for #{name}: #{e.message}"
+      handle_error(e, { name: name })
       false
     end
 
@@ -178,7 +252,6 @@ module Boot
       load(path)
     end
 
-    # Backward-compatible simple versioned loader
     def load_versioned(entries)
       entries.map do |e|
         { path: e[:path], loaded: load(e[:path], version: e[:version]) }
@@ -187,9 +260,6 @@ module Boot
 
     # ============================================================
     # UNIFIED ENTRY POINT: Boot.load
-    # Accepts String or Array. Block is a filter:
-    #   true  => let dispatch handle it
-    #   false => caller already handled it, skip dispatch
     # ============================================================
 
     def load(target, recursive: false, auto_version: false, &block)
@@ -203,11 +273,7 @@ module Boot
       path, version = resolve_target(target, auto_version: auto_version)
 
       if File.directory?(path)
-        load_directory(path,
-          recursive:    recursive,
-          auto_version: auto_version,
-          filter:       block
-        )
+        load_directory(path, recursive: recursive, auto_version: auto_version, filter: block)
       else
         return if block && !block.call(target)
         dispatch(path, version: version)
@@ -221,7 +287,6 @@ module Boot
     end
 
     def resolve_target(target, auto_version:)
-      # Versioned root like "Kestówv0.5.0"
       if target =~ /kest[oó]w?v[\._-]?(\d+\.\d+(?:\.\d+)?)/i
         version = $1
         path    = locate_versioned_root(version)
@@ -230,27 +295,19 @@ module Boot
 
       version = nil
       if auto_version
-        version = extract_version_from_file_header(target) ||
-                  extract_version_from_path(target)
+        version = extract_version_from_file_header(target) || extract_version_from_path(target)
       end
 
       [target, version]
     end
 
-    # Simple locator — can be improved later to search common locations
     def locate_versioned_root(version)
-      # Try common patterns
-      candidates = [
-        "Kestówv#{version}",
-        "Kestowv#{version}",
-        "kestowv-#{version}",
-        "kestowv_#{version}"
-      ]
+      candidates = ["Kestówv#{version}", "Kestowv#{version}", "kestowv-#{version}", "kestowv_#{version}"]
       candidates.find { |c| File.directory?(c) } || "Kestówv#{version}"
     end
 
     # ============================================================
-    # load_directory + helpers (existing)
+    # load_directory
     # ============================================================
 
     def load_directory(dir,
@@ -264,37 +321,25 @@ module Boot
 
       filter ||= block
 
-      files = collect_files(dir,
-        recursive:  recursive,
-        pattern:    pattern,
-        extensions: normalize_extensions(extensions)
-      )
+      files = collect_files(dir, recursive: recursive, pattern: pattern,
+                            extensions: normalize_extensions(extensions))
 
       files.each do |path|
         if filter && !filter.call(path)
           on_skip&.call(path)
           next
         end
-
         dispatch(path)
         on_load&.call(path)
       end
     end
 
     def collect_files(dir, recursive: false, pattern: nil, extensions: nil)
-      glob = if recursive
-               File.join(dir, "**/*")
-             else
-               File.join(dir, "*")
-             end
-
+      glob = recursive ? File.join(dir, "**/*") : File.join(dir, "*")
       files = Dir.glob(glob).select { |f| File.file?(f) }
 
       if extensions
-        files.select! do |f|
-          ext = File.extname(f)
-          extensions.any? { |e| ext == e }
-        end
+        files.select! { |f| extensions.include?(File.extname(f)) }
       end
 
       if pattern
@@ -306,24 +351,37 @@ module Boot
 
     def normalize_extensions(ext)
       case ext
-      in Array        then ext.map { |e| e.start_with?(".") ? e : ".#{e}" }
-      in /[*?{]/      then ext
-      in String       then [ext.start_with?(".") ? ext : ".#{ext}"]
-      in nil          then nil
+      in Array  then ext.map { |e| e.start_with?(".") ? e : ".#{e}" }
+      in /[*?{]/ then ext
+      in String then [ext.start_with?(".") ? ext : ".#{ext}"]
+      in nil    then nil
       end
     end
 
+    # ============================================================
+    # CENTRAL DISPATCH (uses ByteClass + confidence + error handling)
+    # ============================================================
+
     def dispatch(path, version: nil)
-      ext = File.extname(path).downcase
-      case ext
-      when ".rb", ".so"
-        load(path, version: version)
-      when ".txt", ".md", ".conf"
-        load_text(path)
-      when ".json"
-        load_json(path)
-      else
-        mark("unknown_#{ext}")
+      result = byte_dispatch(path)
+
+      if result.confidence < 0.5
+        mark("unclassified_#{File.extname(path)}")
+        return false
+      end
+
+      begin
+        case result.kind
+        when :ruby_source   then load(path, version: version)
+        when :config_json   then load_json(path)
+        when :documentation then load_text(path)
+        when :config_file   then load_text(path)
+        else
+          mark("unclassified_#{File.extname(path)}")
+          false
+        end
+      rescue => e
+        handle_error(e, { path: path, version: version, kind: result.kind })
       end
     end
 
@@ -338,6 +396,12 @@ module Boot
       data = JSON.parse(File.read(path))
       mark(File.basename(path, '.json'))
       data
+    end
+
+    def safe_require(path, version: nil)
+      require path
+    rescue => e
+      handle_error(e, { path: path, version: version })
     end
 
     # ============================================================
@@ -368,7 +432,6 @@ module Boot
         5.times do
           line = f.gets
           break unless line
-
           return $1 if line =~ /#!.*kestowv.*version[:\s=]+(\d+\.\d+(?:\.\d+)?)/i
           return $1 if line =~ /version[:\s=]+["']?(\d+\.\d+(?:\.\d+)?)["']?/i
         end
