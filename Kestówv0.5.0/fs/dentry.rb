@@ -19,7 +19,10 @@ module Kestowv
 
         def create(parent, name, inode)
           @mutex.synchronize do
-            @dentries[[parent, name]] = { inode: inode, created_at: Time.now }
+            @dentries[[parent, name]] = {
+              inode:      inode,
+              created_at: Time.now
+            }
           end
         end
 
