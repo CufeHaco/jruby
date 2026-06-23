@@ -2,14 +2,14 @@
 
 # Kestówv 0.5.0 - fs/buffer.rb
 #
-# Buffer cache simulation.
+# Buffer cache.
 # Registers buffer features.
 
 module Kestowv
   module Fs
     module Buffer
       @buffers = {}
-      @mutex   = Mutex.new
+      @mutex = Mutex.new
 
       class << self
         def register_features
