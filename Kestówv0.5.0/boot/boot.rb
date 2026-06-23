@@ -82,26 +82,105 @@ module Boot
   end
 
   # ============================================================
-  # ByteClass + byte_dispatch
+  # Boot::ByteClass (with deconstruct_keys for pattern matching)
   # ============================================================
 
-  ByteClass = Struct.new(:kind, :confidence, keyword_init: true)
+  ByteClass = Struct.new(:kind, :confidence, :metadata, keyword_init: true) do
+    def to_s
+      "##{kind} (#{(confidence * 100).round}%)"
+    end
+
+    def skip?
+      confidence < 0.5 || kind == :deprecated
+    end
+
+    def loadable?
+      !skip?
+    end
+
+    # Enables `in { kind:, confidence: }` pattern matching
+    def deconstruct_keys(keys)
+      { kind: kind, confidence: confidence, metadata: metadata }
+    end
+  end
+
+  # ============================================================
+  # BYTE DISPATCHER (rich kinds + accurate path checking)
+  # ============================================================
 
   def self.byte_dispatch(path)
+    return ByteClass.new(kind: :unknown, confidence: 0.0) unless File.exist?(path)
+
     ext      = File.extname(path).downcase
-    basename = File.basename(path)
+    basename = File.basename(path).downcase
+    fullpath = File.expand_path(path).downcase
 
     case
-    when ext == ".rb" || ext == ".so"
-      ByteClass.new(kind: :ruby_source,   confidence: 1.0)
+    # === Ruby Source ===
+    when ext == ".rb" && basename.include?("syscall")
+      ByteClass.new(kind: :syscall,        confidence: 0.95)
+    when ext == ".rb" && basename.match?(/init|boot/)
+      ByteClass.new(kind: :kernel_module,  confidence: 0.90)
+    when ext == ".rb"
+      ByteClass.new(kind: :ruby_source,    confidence: 0.85)
+
+    # === Native ===
+    when ext == ".so"
+      ByteClass.new(kind: :native_extension, confidence: 1.0)
+
+    # === Config ===
     when ext == ".json"
-      ByteClass.new(kind: :config_json,   confidence: 1.0)
-    when ext == ".md"  || ext == ".txt"
-      ByteClass.new(kind: :documentation, confidence: 0.9)
-    when basename.match?(/version|config|params/i)
-      ByteClass.new(kind: :config_file,   confidence: 0.8)
+      ByteClass.new(kind: :config_json,    confidence: 0.95)
+    when ext == ".yaml" || ext == ".yml"
+      ByteClass.new(kind: :config_yaml,    confidence: 0.95)
+    when ext == ".conf" || ext == ".cfg"
+      ByteClass.new(kind: :config_file,    confidence: 0.90)
+    when basename.match?(/params|settings|defaults/)
+      ByteClass.new(kind: :config_file,    confidence: 0.85)
+
+    # === Documentation ===
+    when ext == ".md"
+      ByteClass.new(kind: :documentation,  confidence: 0.95)
+    when ext == ".txt"
+      ByteClass.new(kind: :text_file,      confidence: 0.80)
+
+    # === Kernel / HAL / Low-level ===
+    when fullpath.include?("/hal/")
+      ByteClass.new(kind: :hal_driver,          confidence: 0.92)
+    when basename.match?(/interrupt|driver/)
+      ByteClass.new(kind: :hal_driver,          confidence: 0.88)
+    when fullpath.include?("/fs/")
+      ByteClass.new(kind: :fs_driver,           confidence: 0.90)
+    when basename.match?(/inode/)
+      ByteClass.new(kind: :fs_driver,           confidence: 0.85)
+    when fullpath.include?("/ipc/")
+      ByteClass.new(kind: :ipc_message,         confidence: 0.90)
+    when basename.match?(/message|queue/)
+      ByteClass.new(kind: :ipc_message,         confidence: 0.85)
+    when fullpath.include?("/mm/")
+      ByteClass.new(kind: :memory_management,   confidence: 0.90)
+    when basename.match?(/memory|page/)
+      ByteClass.new(kind: :memory_management,   confidence: 0.83)
+
+    # === Deprecated ===
+    when basename.match?(/deprecated|legacy|old/)
+      ByteClass.new(kind: :deprecated,     confidence: 0.70)
+    when fullpath.match?(%r{/0\.[0-3]\.})
+      ByteClass.new(kind: :deprecated,     confidence: 0.60)
+
+    # === Executables ===
+    when ext == ".sh"
+      ByteClass.new(kind: :shell_script,   confidence: 0.90)
+    when ext == "" && File.executable?(path)
+      ByteClass.new(kind: :binary,         confidence: 0.75)
+
+    # === Tests ===
+    when basename.match?(/spec|test/)
+      ByteClass.new(kind: :test_file,      confidence: 0.80)
+
+    # === Fallback ===
     else
-      ByteClass.new(kind: :unknown,       confidence: 0.3)
+      ByteClass.new(kind: :unknown,        confidence: 0.30)
     end
   end
 
@@ -359,30 +438,43 @@ module Boot
     end
 
     # ============================================================
-    # CENTRAL DISPATCH (uses ByteClass + confidence + error handling)
+    # CENTRAL DISPATCHER (uses new ByteClass logic)
     # ============================================================
 
     def dispatch(path, version: nil)
-      result = byte_dispatch(path)
+      bc = byte_dispatch(path)
 
-      if result.confidence < 0.5
-        mark("unclassified_#{File.extname(path)}")
+      if bc.skip?
+        if bc.kind == :deprecated
+          warn "[Boot] Skipping deprecated: #{path}" unless config.quiet
+          mark("skipped_deprecated_#{File.basename(path)}")
+        else
+          mark("unclassified_#{File.extname(path)}")
+        end
         return false
       end
 
-      begin
-        case result.kind
-        when :ruby_source   then load(path, version: version)
-        when :config_json   then load_json(path)
-        when :documentation then load_text(path)
-        when :config_file   then load_text(path)
-        else
-          mark("unclassified_#{File.extname(path)}")
-          false
-        end
-      rescue => e
-        handle_error(e, { path: path, version: version, kind: result.kind })
+      case bc.kind
+      when :ruby_source, :kernel_module, :syscall,
+           :hal_driver, :fs_driver, :ipc_message, :memory_management
+        safe_require(path, version: version)
+      when :native_extension
+        safe_require(path, version: version)
+      when :config_json
+        load_json(path)
+      when :config_yaml
+        load_yaml(path)
+      when :config_file, :documentation, :text_file
+        load_text(path)
+      when :test_file
+        warn "[Boot] Skipping test file at boot: #{path}" unless config.quiet
+        false
+      else
+        mark("unclassified_#{File.extname(path)}")
+        false
       end
+    rescue => e
+      handle_error(e, { path: path, version: version, kind: bc&.kind })
     end
 
     def load_text(path)
