@@ -2,7 +2,7 @@
 
 # Kestówv 0.5.0 - fs/tmpfs.rb
 #
-# Tmpfs (in-memory filesystem) simulation.
+# Tmpfs (in-memory filesystem).
 # Registers tmpfs features.
 
 module Kestowv
@@ -23,6 +23,10 @@ module Kestowv
 
         def read(path)
           @files[path]
+        end
+
+        def write(path, data)
+          @mutex.synchronize { @files[path] = data }
         end
 
         def to_a
