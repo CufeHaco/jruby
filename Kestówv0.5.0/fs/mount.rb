@@ -9,7 +9,7 @@ module Kestowv
   module Fs
     module Mount
       @mounts = {}
-      @mutex  = Mutex.new
+      @mutex = Mutex.new
 
       class << self
         def register_features
