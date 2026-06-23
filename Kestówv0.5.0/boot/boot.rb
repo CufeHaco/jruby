@@ -1,14 +1,14 @@
 # frozen_string_literal: true
 
-# Boot - Reusable Bootloader with Real Bit Vector Logic (v0.5-final)
+# Boot - Reusable Bootloader with Real Bit Vector Logic (v0.6)
 #
-# - Real integer bit vectors (thread-local)
-# - Keys normalized to Symbol
-# - Dynamic arrays kept for introspection
-# - Hotload + StringIO support
+# - Thread-local integer bit vectors
+# - Explicit bitwise operations (set, clear, test, toggle)
+# - Feature flag support
+# - Dynamic arrays + hotload + StringIO
 
 module Boot
-  VERSION = '0.5.0'
+  VERSION = '0.6.0'
 
   $boot_loaded   ||= []
   $boot_features ||= []
@@ -19,6 +19,10 @@ module Boot
   @registry_mutex    = Mutex.new
 
   class << self
+    # ============================================================
+    # REGISTRATION
+    # ============================================================
+
     def register(name)
       key = name.to_sym
       @registry_mutex.synchronize do
@@ -34,9 +38,17 @@ module Boot
       @bit_registry[name.to_sym]
     end
 
+    # ============================================================
+    # THREAD-LOCAL BIT VECTOR
+    # ============================================================
+
     def current_vector
       Thread.current[:boot_bit_vector] ||= 0
     end
+
+    # ============================================================
+    # EXPLICIT BITWISE OPERATIONS
+    # ============================================================
 
     def set_bit(name)
       pos = register(name)
@@ -47,7 +59,6 @@ module Boot
     def clear_bit(name)
       pos = bit_position(name)
       return false unless pos
-
       Thread.current[:boot_bit_vector] = current_vector & ~(1 << pos)
       invalidate_array(name)
       true
@@ -59,17 +70,33 @@ module Boot
       (current_vector & (1 << pos)) != 0
     end
 
-    def mark_array(name)
-      str = name.to_s
-      $boot_loaded   << str unless $boot_loaded.include?(str)
-      $boot_features << str unless $boot_features.include?(str)
+    def toggle_bit(name)
+      if bit_set?(name)
+        clear_bit(name)
+      else
+        set_bit(name)
+      end
     end
 
-    def invalidate_array(name)
-      str = name.to_s
-      $boot_loaded.reject!   { |e| e == str }
-      $boot_features.reject! { |e| e == str }
-      # Note: $boot_versions intentionally kept for audit history
+    # Raw bitwise operations (by bit position)
+    def set_bit_raw(pos)
+      Thread.current[:boot_bit_vector] = current_vector | (1 << pos)
+    end
+
+    def clear_bit_raw(pos)
+      Thread.current[:boot_bit_vector] = current_vector & ~(1 << pos)
+    end
+
+    def test_bit_raw(pos)
+      (current_vector & (1 << pos)) != 0
+    end
+
+    # ============================================================
+    # FEATURE FLAG HELPERS
+    # ============================================================
+
+    def enabled_features
+      @bit_registry.keys.select { |k| bit_set?(k) }
     end
 
     def loaded?(name)
@@ -83,6 +110,26 @@ module Boot
     def invalidate(name)
       clear_bit(name)
     end
+
+    # ============================================================
+    # DYNAMIC ARRAYS (kept in sync)
+    # ============================================================
+
+    def mark_array(name)
+      str = name.to_s
+      $boot_loaded   << str unless $boot_loaded.include?(str)
+      $boot_features << str unless $boot_features.include?(str)
+    end
+
+    def invalidate_array(name)
+      str = name.to_s
+      $boot_loaded.reject!   { |e| e == str }
+      $boot_features.reject! { |e| e == str }
+    end
+
+    # ============================================================
+    # LOADING METHODS
+    # ============================================================
 
     def load_files(paths)
       paths.map { |p| [p, load(p)] }
@@ -124,6 +171,10 @@ module Boot
         { path: e[:path], loaded: load(e[:path], version: e[:version]) }
       end
     end
+
+    # ============================================================
+    # INTROSPECTION
+    # ============================================================
 
     def to_a
       $boot_loaded
