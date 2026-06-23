@@ -1,57 +1,66 @@
 # frozen_string_literal: true
 
-# Kestówv 0.5.0 - hal/memory.rb
+# Kestówv 0.5.0 — hal/memory.rb
 #
-# Memory hardware abstraction.
-# Registers memory features.
+# Memory abstraction (physical + virtual regions).
 
 module Kestowv
   module Hal
     module Memory
-      @total = 1024 * 1024 * 1024  # 1GB default
-      @used  = 0
-      @mutex = Mutex.new
+
+      @regions = {}
+      @mutex   = Mutex.new
 
       class << self
-        def register_features
+
+        def register
           Boot.register(:hal_memory)
           Boot.set_bit(:hal_memory)
         end
 
-        def total
-          @total
-        end
-
-        def used
-          @used
-        end
-
-        def allocate(size)
+        def add_region(name, start, size, type: :ram)
           @mutex.synchronize do
-            return false unless @used + size <= @total
-            @used += size
-            true
+            @regions[name] = {
+              name:  name,
+              start: start,
+              size:  size,
+              type:  type,
+              used:  0
+            }
           end
         end
 
-        def free(size)
-          @mutex.synchronize { @used -= size if @used >= size }
+        def get(name)
+          @mutex.synchronize { @regions[name] }
+        end
+
+        def total_ram
+          @mutex.synchronize do
+            @regions.values.select { |r| r[:type] == :ram }.sum { |r| r[:size] }
+          end
         end
 
         def to_a
-          {
-            total: @total,
-            used:  @used
-          }
+          @mutex.synchronize { @regions.values.dup }
         end
 
         def stats
-          {
-            feature:       :hal_memory,
-            usage_percent: (@used.to_f / @total * 100).round(2)
-          }
+          @mutex.synchronize do
+            {
+              feature:   :hal_memory,
+              regions:   @regions.size,
+              total_ram: total_ram
+            }
+          end
         end
       end
     end
   end
 end
+
+Kestowv::Config::Modules.register(
+  :hal_memory,
+  __FILE__,
+  feature:    :hal_memory,
+  depends_on: [:hal_cpu]
+)
