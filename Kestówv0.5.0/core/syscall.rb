@@ -3,7 +3,7 @@
 # Kestówv 0.5.0 — core/syscall.rb
 #
 # System call interface.
-# Provides registration and dispatch for syscalls.
+# Registration + dispatch table with Boot integration.
 
 module Kestowv
   module Core
@@ -13,17 +13,17 @@ module Kestowv
       @names    = {}
       @mutex    = Mutex.new
 
-      # Standard syscall numbers (extend as needed)
+      # Basic syscall numbers (extend as the system grows)
       SYSCALLS = {
-        read:           0,
-        write:          1,
-        open:           2,
-        close:          3,
-        fork:           57,
-        execve:         59,
-        exit:           60,
-        getpid:         39,
-        sched_yield:    24
+        read:        0,
+        write:       1,
+        open:        2,
+        close:       3,
+        fork:       57,
+        execve:     59,
+        exit:       60,
+        getpid:     39,
+        sched_yield: 24
       }.freeze
 
       class << self
@@ -34,5 +34,5 @@ module Kestowv
 
           @mutex.synchronize do
             @handlers[num] = block if block
-            @names[key]    = num
+            @names[key] = num
             Boot.register(:
