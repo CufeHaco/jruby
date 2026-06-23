@@ -1,41 +1,38 @@
 # frozen_string_literal: true
 
-# Kestówv 0.5.0 - core/syscall.rb
+# Kestówv 0.5.0 — core/syscall.rb
 #
-# System call interface simulation.
-# Registers syscall features.
+# System call interface.
+# Provides registration and dispatch for syscalls.
 
 module Kestowv
   module Core
     module Syscall
+
       @handlers = {}
+      @names    = {}
       @mutex    = Mutex.new
 
+      # Standard syscall numbers (extend as needed)
+      SYSCALLS = {
+        read:           0,
+        write:          1,
+        open:           2,
+        close:          3,
+        fork:           57,
+        execve:         59,
+        exit:           60,
+        getpid:         39,
+        sched_yield:    24
+      }.freeze
+
       class << self
-        def register_features
-          Boot.register(:core_syscall)
-          Boot.set_bit(:core_syscall)
-        end
 
-        def register(number, &block)
-          @mutex.synchronize { @handlers[number] = block }
-        end
+        def register(name, number = nil, &block)
+          key = name.to_sym
+          num = number || SYSCALLS[key]
 
-        def invoke(number, *args)
-          @handlers[number]&.call(*args)
-        end
-
-        def to_a
-          @handlers.keys
-        end
-
-        def stats
-          {
-            feature:  :core_syscall,
-            handlers: @handlers.size
-          }
-        end
-      end
-    end
-  end
-end
+          @mutex.synchronize do
+            @handlers[num] = block if block
+            @names[key]    = num
+            Boot.register(:
