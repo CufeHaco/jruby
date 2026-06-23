@@ -1,59 +1,37 @@
 # frozen_string_literal: true
 
-# Kestówv 0.5.0 - core/thread.rb
+# Kestówv 0.5.0 — core/thread.rb
 #
-# Thread management primitives.
-# Registers thread features in the bit vector.
+# Thread management with KObject integration and scheduler awareness.
 
 module Kestowv
   module Core
     module Thread
+
       @threads  = {}
       @next_tid = 1
       @mutex    = Mutex.new
 
       class << self
-        def register_features
+
+        def register
           Boot.register(:core_thread)
           Boot.set_bit(:core_thread)
         end
 
-        def create(&block)
-          @mutex.synchronize do
-            tid = @next_tid
-            @next_tid += 1
-            @threads[tid] = {
-              thread:     ::Thread.new(&block),
-              created_at: Time.now
-            }
-            tid
-          end
-        end
+        def create(name: nil, &block)
+          tid = allocate_tid
 
-        def join(tid)
-          @threads[tid]&.[](:thread)&.join
-        end
+          kthread = KObject.new(type_tag: :thread)
 
-        def kill(tid)
-          @threads[tid]&.[](:thread)&.kill
-          @mutex.synchronize { @threads.delete(tid) }
-        end
-
-        def active
-          @threads.keys
-        end
-
-        def to_a
-          @threads.keys
-        end
-
-        def stats
-          {
-            feature: :core_thread,
-            active:  @threads.size
+          entry = {
+            kobject:    kthread,
+            thread:     ::Thread.new(&block),
+            name:       name || "thread-#{tid}",
+            state:      :running,
+            created_at: Time.now
           }
-        end
-      end
-    end
-  end
-end
+
+          @mutex.synchronize { @threads[tid] = entry }
+
+          Boot.set_bit(:
