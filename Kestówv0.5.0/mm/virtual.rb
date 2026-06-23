@@ -9,7 +9,7 @@ module Kestowv
   module Mm
     module Virtual
       @mappings = {}
-      @mutex    = Mutex.new
+      @mutex = Mutex.new
 
       class << self
         def register_features
@@ -36,7 +36,7 @@ module Kestowv
 
         def stats
           {
-            feature:   :mm_virtual,
+            feature: :mm_virtual,
             processes: @mappings.size
           }
         end
