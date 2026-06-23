@@ -1,39 +1,71 @@
 # frozen_string_literal: true
 
-# Kestówv 0.5.0 - core/locks.rb
+# Kestówv 0.5.0 — core/locks.rb
 #
-# Basic locking primitives.
-# Registers lock types as features.
+# Locking primitives with contention tracking and KThread awareness.
 
 module Kestowv
   module Core
     module Locks
+
       @locks = {}
       @mutex = Mutex.new
 
       class << self
-        def register_type(name)
-          Boot.register(:"lock_#{name}")
-          Boot.set_bit(:"lock_#{name}")
+
+        def register
+          Boot.register(:core_locks)
+          Boot.set_bit(:core_locks)
         end
 
         def create(name, type: :mutex)
-          register_type(type)
           @mutex.synchronize do
-            @locks[name] = { type: type, mutex: Mutex.new }
+            @locks[name] = {
+              type: type,
+              mutex: Mutex.new,
+              waiters: 0,
+              acquisitions: 0
+            }
           end
         end
 
         def synchronize(name)
-          lock = @locks[name]
+          lock = @mutex.synchronize { @locks[name] }
           return yield unless lock
-          lock[:mutex].synchronize { yield }
+
+          @mutex.synchronize { lock[:waiters] += 1 }
+          begin
+            lock[:mutex].synchronize do
+              @mutex.synchronize { lock[:acquisitions] += 1 }
+              yield
+            end
+          ensure
+            @mutex.synchronize { lock[:waiters] -= 1 }
+          end
+        end
+
+        def stats
+          @mutex.synchronize do
+            @locks.transform_values do |l|
+              {
+                type: l[:type],
+                waiters: l[:waiters],
+                acquisitions: l[:acquisitions]
+              }
+            end
+          end
         end
 
         def to_a
-          @locks.keys
+          @mutex.synchronize { @locks.keys.dup }
         end
       end
     end
   end
 end
+
+Kestowv::Config::Modules.register(
+  :core_locks,
+  __FILE__,
+  feature: :locks
+)
