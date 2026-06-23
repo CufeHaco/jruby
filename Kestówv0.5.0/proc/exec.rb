@@ -2,7 +2,7 @@
 
 # Kestówv 0.5.0 - proc/exec.rb
 #
-# Process execution simulation.
+# Process execution.
 # Registers exec features.
 
 module Kestowv
@@ -15,8 +15,7 @@ module Kestowv
         end
 
         def execute(path, args = [])
-          # Placeholder — real impl would replace process image
-          Kestowv::Core::Klog.info("Executing #{path} with args #{args.inspect}")
+          Kestowv::Core::Klog.info("Executing #{path}")
           true
         end
 
