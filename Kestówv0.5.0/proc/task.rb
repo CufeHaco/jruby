@@ -38,6 +38,12 @@ module Kestowv
         @limits   = nil
         @ns_set   = nil
 
+        # Signal state — all protected by @mutex
+        @sig_mask     = 0          # blocked signals (bitmask)
+        @sig_pending  = 0          # pending signals (bitmask)
+        @sig_handlers = {}         # signo => :default | :ignore | Proc
+        @sig_infos    = {}         # signo => SigInfo
+
         Boot.register(task_bit)
         Boot.set_bit(task_bit)
       end
@@ -132,6 +138,59 @@ module Kestowv
       end
 
       # --------------------------------------------------------
+      # SIGNAL STATE (all reads/writes through @mutex)
+      # --------------------------------------------------------
+
+      def sig_mask
+        @mutex.synchronize { @sig_mask }
+      end
+
+      def sig_pending
+        @mutex.synchronize { @sig_pending }
+      end
+
+      def sig_handlers
+        @mutex.synchronize { @sig_handlers.dup }
+      end
+
+      # Post a signal (called by SignalDelivery)
+      def post_signal(info)
+        return unless info.is_a?(Signal::SigInfo)
+
+        @mutex.synchronize do
+          @sig_pending |= Signal.bit(info.signo)
+          @sig_infos[info.signo] = info
+        end
+        self
+      end
+
+      # Clear a specific signal from pending state
+      def clear_signal(signo)
+        @mutex.synchronize do
+          @sig_pending &= ~Signal.bit(signo)
+          @sig_infos.delete(signo)
+        end
+        self
+      end
+
+      # Remove and return the SigInfo for a signal (used during delivery)
+      def dequeue_signal(signo)
+        @mutex.synchronize do
+          @sig_pending &= ~Signal.bit(signo)
+          @sig_infos.delete(signo)
+        end
+      end
+
+      # Set signal handler (called by user code or exec reset)
+      def set_signal_handler(signo, handler)
+        unless Signal.valid_handler?(handler)
+          raise ArgumentError, "Invalid signal handler"
+        end
+        @mutex.synchronize { @sig_handlers[signo] = handler }
+        self
+      end
+
+      # --------------------------------------------------------
       # LIFECYCLE OVERRIDE
       # --------------------------------------------------------
 
@@ -148,12 +207,14 @@ module Kestowv
       def to_h
         @mutex.synchronize do
           super.merge(
-            tid:      @tid,
-            name:     @name,
-            state:    @state,
-            vm_space: @vm_space&.to_s,
-            cred:     @cred&.to_s,
-            ns_set:   @ns_set&.to_h
+            tid:         @tid,
+            name:        @name,
+            state:       @state,
+            vm_space:    @vm_space&.to_s,
+            cred:        @cred&.to_s,
+            ns_set:      @ns_set&.to_h,
+            sig_pending: Signal.from_mask(@sig_pending),
+            sig_mask:    Signal.from_mask(@sig_mask)
           )
         end
       end
@@ -179,5 +240,5 @@ Kestowv::Config::Modules.register(
   :proc_task,
   __FILE__,
   feature:    :proc_task,
-  depends_on: [:core_kobject, :core_thread, :mm_vm_space]
+  depends_on: [:core_kobject, :core_thread, :mm_vm_space, :core_signals]
 )
