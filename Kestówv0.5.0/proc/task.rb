@@ -33,7 +33,10 @@ module Kestowv
         @tid      = self.class.next_tid
         @name     = (name || :"task_#{@tid}").to_sym
         @state    = :ready
-        @vm_space = vm_space  # optional — assigned when mm is ready
+        @vm_space = vm_space
+        @cred     = nil
+        @limits   = nil
+        @ns_set   = nil
 
         Boot.register(task_bit)
         Boot.set_bit(task_bit)
@@ -88,6 +91,47 @@ module Kestowv
       end
 
       # --------------------------------------------------------
+      # CREDENTIALS
+      # --------------------------------------------------------
+
+      def cred
+        @mutex.synchronize { @cred }
+      end
+
+      def assign_credentials(cred)
+        raise ArgumentError, "Expected Cred" unless cred.is_a?(Proc::Credentials::Cred)
+        @mutex.synchronize { @cred = cred }
+        self
+      end
+
+      # --------------------------------------------------------
+      # LIMITS
+      # --------------------------------------------------------
+
+      def limits
+        @mutex.synchronize { @limits }
+      end
+
+      def assign_limits(limits)
+        @mutex.synchronize { @limits = limits }
+        self
+      end
+
+      # --------------------------------------------------------
+      # NAMESPACE SET
+      # --------------------------------------------------------
+
+      def ns_set
+        @mutex.synchronize { @ns_set }
+      end
+
+      def assign_ns_set(ns_set)
+        raise ArgumentError, "Expected NamespaceSet" unless ns_set.is_a?(Proc::Namespace::NamespaceSet)
+        @mutex.synchronize { @ns_set = ns_set }
+        self
+      end
+
+      # --------------------------------------------------------
       # LIFECYCLE OVERRIDE
       # --------------------------------------------------------
 
@@ -107,7 +151,9 @@ module Kestowv
             tid:      @tid,
             name:     @name,
             state:    @state,
-            vm_space: @vm_space&.to_s
+            vm_space: @vm_space&.to_s,
+            cred:     @cred&.to_s,
+            ns_set:   @ns_set&.to_h
           )
         end
       end
