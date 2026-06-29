@@ -33,12 +33,12 @@ Hub     = Net::UnixHub
 USocket = Net::UnixSocket
 
 SOCK_PATH  = "/tmp/kestowv_cli_#{Process.pid}.sock"
-CLI_SCRIPT = File.expand_path("../cli/shell.rb", __dir__)
+CLI_SCRIPT = File.expand_path("../RubyOS 0.1.0/pid1.rb", __dir__)
 RUBY_BIN   = RbConfig::CONFIG['bindir'] + '/' + RbConfig::CONFIG['ruby_install_name'] rescue '/usr/bin/ruby'
 
 # ── Register the CRuby shell with the kernel ──────────────────────────────────
 cli_task = KProc::Task.new(name: :cli_shell)
-cli_task.assign_credentials(KProc::Credentials.root)
+cli_task.assign_credentials(KProc::Credentials.user(uid: 1000, gid: 1000))
 cli_pid  = KProc::Pid.allocate(task: cli_task)
 KProc::Exec.execve(CLI_SCRIPT, [RUBY_BIN, CLI_SCRIPT, SOCK_PATH], {}, task: cli_task)
 cli_task.transition(:running)
@@ -79,9 +79,11 @@ puts ""
 
 # ── Command dispatcher — answers requests from the CRuby shell ───────────────
 module CommandDispatcher
-  COMMANDS = %w[help ps kill status uname ls cat write mounts exit quit].freeze
+  COMMANDS = %w[help ps kill status uname ls cat write whoami sudo mounts exit quit].freeze
 
   class << self
+    attr_accessor :cli_task
+
     def dispatch(req)
       cmd  = req["cmd"].to_s
       args = Array(req["args"])
@@ -95,6 +97,8 @@ module CommandDispatcher
       when "ls"            then ls(args)
       when "cat"           then cat(args)
       when "write"         then write(args)
+      when "whoami"        then ok(whoami_info)
+      when "sudo"          then sudo(args)
       when "mounts"        then ok(mounts_table)
       when "exit", "quit"  then ok({ "bye" => true })
       else                      err("unknown command: #{cmd.inspect}")
@@ -186,12 +190,37 @@ module CommandDispatcher
     end
 
     def write(args)
+      return err("permission denied (try: sudo write ...)") unless cli_task.cred.root?
+
       path, *rest = args
       return err("usage: write <path> <data...>") if !path || rest.empty?
 
       data = rest.join(" ")
       Fs.write(path, data)
       ok({ "path" => path, "bytes" => data.bytesize })
+    end
+
+    def whoami_info
+      cred = cli_task.cred
+      {
+        "uid"  => cred.uid,
+        "euid" => cred.euid,
+        "gid"  => cred.gid,
+        "root" => cred.root?
+      }
+    end
+
+    def sudo(args)
+      subcmd, *subargs = args
+      return err("usage: sudo <command> [args...]") unless subcmd
+
+      original = cli_task.cred
+      cli_task.assign_credentials(KProc::Credentials.root)
+      begin
+        dispatch("cmd" => subcmd, "args" => subargs)
+      ensure
+        cli_task.assign_credentials(original)
+      end
     end
 
     def mounts_table
@@ -206,6 +235,8 @@ module CommandDispatcher
     end
   end
 end
+
+CommandDispatcher.cli_task = cli_task
 
 # ── Request/response loop — bidirectional, unlike the one-way dashboards ─────
 stop     = false
