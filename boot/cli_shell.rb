@@ -34,7 +34,17 @@ USocket = Net::UnixSocket
 
 SOCK_PATH  = "/tmp/kestowv_cli_#{Process.pid}.sock"
 CLI_SCRIPT = File.expand_path("../RubyOS 0.1.0/pid1.rb", __dir__)
-RUBY_BIN   = RbConfig::CONFIG['bindir'] + '/' + RbConfig::CONFIG['ruby_install_name'] rescue '/usr/bin/ruby'
+
+# Kestowv itself always runs on JRuby — but userspace (PID 1 / Rubian) runs
+# on CRuby, so under JRuby we must locate a real CRuby binary rather than
+# resolving RbConfig against the JVM process we're already running in.
+RUBY_BIN =
+  if defined?(JRUBY_VERSION)
+    %w[/usr/local/bin/ruby /usr/bin/ruby].find { |p| File.executable?(p) } ||
+      abort("No CRuby interpreter found for the userspace shell")
+  else
+    (RbConfig::CONFIG['bindir'] + '/' + RbConfig::CONFIG['ruby_install_name']) rescue '/usr/bin/ruby'
+  end
 
 # ── Register the CRuby shell with the kernel ──────────────────────────────────
 cli_task = KProc::Task.new(name: :cli_shell)

@@ -239,7 +239,7 @@ module Kestowv
         @nodes.values.select do |n|
           n.path != dir_path &&
             n.path.start_with?(prefix) &&
-            n.path.delete_prefix(prefix).exclude?("/")
+            !n.path.delete_prefix(prefix).include?("/")
         end
       end
 
