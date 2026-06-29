@@ -36,7 +36,11 @@
 # ==================================
 # Positions 0..59 keep 1<<pos inside Java long (Fixnum) territory.
 # All ops stay zero-allocation → JIT-compilable hot loop.
-# Thread.current[:boot_bit_vector] writes still exercise BopTracker.
+# Thread.current[:boot_bit_vector] and the fixed Boot::ClassFlags
+# vector (Thread.current[:boot_class_flags]) are separate fields on
+# the same per-thread storage JRuby's ThreadContext.builtinBits also
+# lives on (built-ins branch, org.jruby.runtime.Builtins) — same
+# thread-local home, not the same bits.
 #
 # ─────────────────────────────────────────────────────────────────────────
 # TUNING KNOBS — TRANSFORMER BANK MODE

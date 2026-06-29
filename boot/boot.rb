@@ -216,6 +216,65 @@ module Boot
     end
   end
 
+  # ============================================================
+  # CLASS FLAGS — fixed bit-position constants
+  #
+  # @bit_registry/register assigns positions by auto-increment order
+  # of first use, which is right for the hundreds of ad-hoc feature
+  # bits registered across the kernel (per-task, per-CPU, per-socket,
+  # ...). ByteClass kinds are different: a small, closed enum decided
+  # once in byte_dispatch, the same shape as CRuby's value classes
+  # (Fixnum, Float, String, ...). So they get fixed named constants
+  # instead — mirroring org.jruby.runtime.Builtins (built-ins branch,
+  # FIXNUM=1<<0, FLOAT=1<<1, STRING=1<<2, ...) rather than the dynamic
+  # registry.
+  # ============================================================
+  module ClassFlags
+    KERNEL_MODULE     = 1 << 0
+    RUBY_SOURCE       = 1 << 1
+    SYSCALL           = 1 << 2
+    HAL_DRIVER        = 1 << 3
+    FS_DRIVER         = 1 << 4
+    IPC_MESSAGE       = 1 << 5
+    MEMORY_MANAGEMENT = 1 << 6
+    NATIVE_EXTENSION  = 1 << 7
+    CONFIG_JSON       = 1 << 8
+    CONFIG_YAML       = 1 << 9
+    CONFIG_FILE       = 1 << 10
+    DOCUMENTATION     = 1 << 11
+    TEXT_FILE         = 1 << 12
+    SHELL_SCRIPT      = 1 << 13
+    BINARY            = 1 << 14
+    DEPRECATED        = 1 << 15
+    TEST_FILE         = 1 << 16
+    UNKNOWN           = 1 << 17
+
+    BY_KIND = {
+      kernel_module:     KERNEL_MODULE,
+      ruby_source:       RUBY_SOURCE,
+      syscall:           SYSCALL,
+      hal_driver:        HAL_DRIVER,
+      fs_driver:         FS_DRIVER,
+      ipc_message:       IPC_MESSAGE,
+      memory_management: MEMORY_MANAGEMENT,
+      native_extension:  NATIVE_EXTENSION,
+      config_json:       CONFIG_JSON,
+      config_yaml:       CONFIG_YAML,
+      config_file:       CONFIG_FILE,
+      documentation:     DOCUMENTATION,
+      text_file:         TEXT_FILE,
+      shell_script:      SHELL_SCRIPT,
+      binary:            BINARY,
+      deprecated:        DEPRECATED,
+      test_file:         TEST_FILE,
+      unknown:           UNKNOWN
+    }.freeze
+
+    def self.for_kind(kind)
+      BY_KIND.fetch(kind, UNKNOWN)
+    end
+  end
+
   class << self
     # ============================================================
     # REGISTRATION
@@ -291,6 +350,28 @@ module Boot
     def test_bit_raw(pos)
       tc = Thread.current
       ((tc[:boot_bit_vector] || 0) & (1 << pos)) != 0
+    end
+
+    # ============================================================
+    # CLASS FLAG BIT VECTOR — fixed positions, separate thread-local
+    # slot from :boot_bit_vector (different convention, see ClassFlags)
+    # ============================================================
+
+    def class_flags_vector
+      Thread.current[:boot_class_flags] ||= 0
+    end
+
+    def mark_class_flag(kind)
+      flag = ClassFlags.for_kind(kind)
+      Thread.current[:boot_class_flags] = class_flags_vector | flag
+    end
+
+    def class_flag_set?(kind)
+      (class_flags_vector & ClassFlags.for_kind(kind)) != 0
+    end
+
+    def enabled_class_flags
+      ClassFlags::BY_KIND.keys.select { |k| class_flag_set?(k) }
     end
 
     # ============================================================
@@ -486,6 +567,7 @@ module Boot
 
     def dispatch(path, version: nil)
       bc = byte_dispatch(path)
+      mark_class_flag(bc.kind)
 
       if bc.skip?
         if bc.kind == :deprecated
