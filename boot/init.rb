@@ -53,6 +53,7 @@ module Kestowv
           :networking,
           :ipc,
           :binary_classifier,
+          :byte_matcher,
           :core_wave,
           :kestowv_init_complete
         ].each { |f| Boot.register(f) }
@@ -111,6 +112,14 @@ module Kestowv
         # Step 3a — Binary Classifier (core/binary_classifier.rb, loaded via core/)
         step("Core: BinaryClassifier") do
           Core::BinaryClassifier.register_with_boot
+        end
+
+        # Step 3a.1 — ByteMatcher (core/byte_matcher.rb, loaded via core/)
+        # Plain-Ruby Boyer-Moore-Horspool search over StringIO/String byte
+        # data — see core/byte_matcher.rb header for why this isn't a
+        # wrapper around the (never-merged) bytematcher-experiment classes.
+        step("Core: ByteMatcher") do
+          Core::ByteMatcher.register_with_boot
         end
 
         # Step 3b — CPU Wave Scheduler (core/wave.rb)
